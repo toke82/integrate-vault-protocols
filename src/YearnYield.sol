@@ -13,6 +13,8 @@ contract YearnYield is ERC20, ReentrancyGuard {
     //////////////////
     error YearnYield__NotZeroAddress();
     error YearnYield__NeedsMoreThanZero();
+    error YearnYield__NoAvailableShares();
+    error YearnYield__NotEnoughAvailableSharesForAmount();
 
     //////////////////
     //  Modifiers
@@ -31,7 +33,19 @@ contract YearnYield is ERC20, ReentrancyGuard {
     ////////////////// 
     /// EVENTS
     ////////////////// 
-    event Deposit(address indexed calller, address indexed owner, uint256 assets, uint256 shares);
+    event Deposit(
+        address indexed calller, 
+        address indexed owner, 
+        uint256 assets, 
+        uint256 shares
+    );
+    event Withdraw(
+        address indexed caller, 
+        address indexed receiver, 
+        address indexed owner, 
+        uint256 assets, 
+        uint256 shares
+    );
 
     constructor(VaultAPI _vault) 
         ERC20(
@@ -59,6 +73,17 @@ contract YearnYield is ERC20, ReentrancyGuard {
         (assets, shares) = _deposit(assets, receiver, msg.sender);
 
         emit Deposit(msg.sender, receiver, assets, shares); 
+    }
+
+    function withdraw(uint256 assets, address receiver, address owner) 
+        external moreThanZero(assets)
+        nonReentrant
+        returns (uint256 shares) 
+    {
+        (uint256 _withdrawn, uint256 _burntShares) = _withdraw(assets, receiver, msg.sender);
+
+        emit Withdraw(msg.sender, receiver, owner, _withdrawn, _burntShares);
+        return _burntShares;
     }
 
     ///////////////////////////////
@@ -106,6 +131,44 @@ contract YearnYield is ERC20, ReentrancyGuard {
         if (refundable > 0) {
             SafeERC20.safeTransfer(_token, depositor, refundable);
         }
+    }
+
+    function _withdraw(
+        uint256 amount, 
+        address receiver, 
+        address sender
+        ) internal returns(uint256 withdrawn, uint256 burntShares) 
+    {
+        VaultAPI _vault = yVault;
+
+        // Star with the total shares that `sender` has
+        // Limit by maximum withdrawl size of each vault
+        uint256 availableShares = Math.min(
+            this.balanceOf(sender),
+            _vault.maxAvailableShares()
+        );
+
+        if (availableShares == 0) revert YearnYield__NoAvailableShares();
+
+        uint256 estimatedMaxShares = (amount * 10**uint256(_vault.decimals()));
+
+        if (estimatedMaxShares > availableShares) 
+            revert YearnYield__NotEnoughAvailableSharesForAmount();
+
+        // beforeWithDraw custom logic
+
+        // withdraw from the vault and get total used shares
+        uint256 beforeBal = _vault.balanceOf(address(this));
+        withdrawn = _vault.withdraw(estimatedMaxShares, receiver);
+        burntShares = beforeBal - _vault.balanceOf(address(this));
+        uint256 unusedShares = estimatedMaxShares - burntShares;  
+
+
+        // afterWithDraw custom logic
+        _burn(sender, burntShares);
+
+        if (unusedShares > 0)
+            SafeERC20.safeTransfer(_vault, sender, unusedShares);
     }
 
 }
